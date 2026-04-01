@@ -186,12 +186,6 @@ _ocr_last_submitted: int = -1
 _ocr_warmup_count: int = 0
 _ocr_warmed_up: bool = False
 
-# ==========================================================
-# TWO-PHASE COMMIT (2PC) SYNCHRONIZATION
-# ==========================================================
-# Phase 1 (PREPARE): Pipeline signals it's ready to consume frames
-# Phase 2 (COMMIT):  RTSP streamer signals stream is available
-#
 # This ensures all stations start processing at the same video timestamp.
 # Fault-tolerant: idempotent signals, timeout handling, retry on restart.
 # ==========================================================
@@ -202,152 +196,6 @@ _source_type = os.environ.get('SOURCE_TYPE', 'rtsp')
 # (SERVICE_MODE=parallel).  For any user-initiated source — file upload OR
 # manual RTSP URL via Gradio UI — the stream is already available.
 _service_mode = os.environ.get('SERVICE_MODE', 'single')
-_need_2pc = (_service_mode == 'parallel')
-_commit_received: bool = (not _need_2pc)
-_prepare_signaled: bool = False
-
-# 2PC timeout configuration
-SYNC_PREPARE_TIMEOUT = float(os.environ.get("SYNC_PREPARE_TIMEOUT", "60"))  # Max wait for commit (seconds)
-SYNC_CHECK_INTERVAL = float(os.environ.get("SYNC_CHECK_INTERVAL", "0.5"))    # Poll interval for commit signal
-
-
-def _get_sync_dirs():
-    """Get sync directory paths for 2PC."""
-    base_dir = os.environ.get('PIPELINE_SYNC_DIR', '/sync/ready')
-    base = os.path.dirname(base_dir) if base_dir.endswith('/ready') else base_dir.replace('/ready', '')
-    if not base:
-        base = '/sync'
-    return {
-        'prepare': os.path.join(base, 'prepare'),
-        'commit': os.path.join(base, 'commit'),
-        'ready': base_dir,
-        'ocr_ready': os.path.join(base, 'ocr_ready'),
-    }
-
-
-def _signal_prepare():
-    """
-    Phase 1 of 2PC: Signal that pipeline is PREPARED and ready to consume frames.
-    
-    Creates /sync/prepare/{STATION_ID} file. The RTSP streamer watches for
-    these files and starts streams only after ALL stations have signaled PREPARE.
-    
-    This signal indicates:
-    - GStreamer pipeline is initialized
-    - OCR subprocess is warmed up
-    - Pipeline is ready to process frames from video second 0
-    
-    Idempotent: Safe to call multiple times (e.g., on restart).
-    """
-    global _prepare_signaled
-    
-    dirs = _get_sync_dirs()
-    prepare_dir = dirs['prepare']
-    
-    try:
-        os.makedirs(prepare_dir, exist_ok=True)
-        prepare_file = os.path.join(prepare_dir, STATION_ID)
-        
-        with open(prepare_file, 'w') as f:
-            f.write(f"{time.time()}\n{PIPELINE_ID}\n")
-        
-        _prepare_signaled = True
-        log(f"[2PC-PREPARE] [{ts()}] Signaled PREPARE: {prepare_file}")
-        log(f"[2PC-PREPARE] [{ts()}] Waiting for COMMIT from RTSP streamer...")
-        
-    except Exception as e:
-        log(f"[2PC-PREPARE] [{ts()}] Failed to signal PREPARE: {e}")
-
-
-def _check_commit() -> bool:
-    """
-    Check if COMMIT signal has been received (non-blocking).
-    
-    Returns True if /sync/commit/{STATION_ID} file exists.
-    """
-    global _commit_received
-    
-    if _commit_received:
-        return True
-    
-    dirs = _get_sync_dirs()
-    commit_file = os.path.join(dirs['commit'], STATION_ID)
-    
-    if os.path.exists(commit_file):
-        _commit_received = True
-        log(f"[2PC-COMMIT] [{ts()}] COMMIT received: {commit_file}")
-        return True
-    
-    return False
-
-
-def _wait_for_commit(timeout: float = 0) -> bool:
-    """
-    Phase 2 of 2PC: Wait for COMMIT signal from RTSP streamer.
-    
-    Blocks until /sync/commit/{STATION_ID} file appears or timeout expires.
-    
-    Args:
-        timeout: Max seconds to wait (default: SYNC_PREPARE_TIMEOUT)
-    
-    Returns:
-        True if COMMIT received, False if timeout expired (ABORT)
-    
-    Fault Tolerance:
-        - Timeout prevents deadlock if RTSP streamer crashes
-        - Can be called multiple times (idempotent)
-    """
-    global _commit_received
-    
-    if _commit_received:
-        return True
-    
-    timeout = timeout or SYNC_PREPARE_TIMEOUT
-    dirs = _get_sync_dirs()
-    commit_file = os.path.join(dirs['commit'], STATION_ID)
-    
-    start_time = time.time()
-    elapsed = 0
-    
-    while elapsed < timeout:
-        if os.path.exists(commit_file):
-            _commit_received = True
-            log(f"[2PC-COMMIT] [{ts()}] COMMIT received after {elapsed:.1f}s: {commit_file}")
-            return True
-        
-        # Log progress every 5 seconds
-        if int(elapsed) % 5 == 0 and int(elapsed) > 0:
-            log(f"[2PC-WAIT] [{ts()}] Waiting for COMMIT... ({elapsed:.0f}s/{timeout:.0f}s)")
-        
-        time.sleep(SYNC_CHECK_INTERVAL)
-        elapsed = time.time() - start_time
-    
-    log(f"[2PC-ABORT] [{ts()}] COMMIT timeout after {timeout}s - ABORTING")
-    return False
-
-
-def _signal_ocr_ready():
-    """
-    Legacy function - now calls _signal_prepare() for backward compatibility.
-    
-    Creates /sync/ocr_ready/{STATION_ID} file. The RTSP streamer watches for
-    these files and starts streams AFTER all stations are OCR-ready.
-    This ensures order 384 (the first order) is captured from frame 1.
-    """
-    # Also signal via legacy ocr_ready path for backward compatibility
-    dirs = _get_sync_dirs()
-    ocr_ready_dir = dirs['ocr_ready']
-    
-    try:
-        os.makedirs(ocr_ready_dir, exist_ok=True)
-        ready_file = os.path.join(ocr_ready_dir, STATION_ID)
-        
-        with open(ready_file, 'w') as f:
-            f.write(f"{time.time()}\n")
-        
-        log(f"[OCR-READY] [{ts()}] Signaled OCR ready: {ready_file}")
-    except Exception as e:
-        log(f"[OCR-READY] [{ts()}] Failed to signal OCR ready: {e}")
 
 
 def _do_ocr_warmup():
@@ -421,29 +269,6 @@ def _do_ocr_warmup():
     _ocr_warmup_count = OCR_WARMUP_FRAMES
     log(f"[OCR-WARMUP] [{ts()}] OCR warmup complete")
     
-    # ========== TWO-PHASE COMMIT: PREPARE + WAIT FOR COMMIT ==========
-    # 2PC is only needed in parallel mode where the RTSP streamer service
-    # orchestrates stream startup.  For user-initiated sources (file upload
-    # or manual RTSP URL via Gradio UI) the source is already available.
-    if not _need_2pc:
-        log(f"[2PC-SKIP] [{ts()}] Skipping 2PC sync (service_mode={_service_mode}, source={_source_type})")
-    else:
-        # Phase 1: Signal PREPARE - we're ready to consume frames
-        _signal_prepare()
-        
-        # Also signal legacy ocr_ready for backward compatibility with RTSP streamer
-        _signal_ocr_ready()
-        
-        # Phase 2: Wait for COMMIT - RTSP streamer will signal when stream is ready
-        if _wait_for_commit():
-            log(f"[2PC-SUCCESS] [{ts()}] Synchronization complete - ready to process frames!")
-        else:
-            # Timeout - proceed anyway but log warning
-            log(f"[2PC-WARNING] [{ts()}] COMMIT not received - proceeding without sync")
-            log(f"[2PC-WARNING] [{ts()}] First order may be missed if RTSP not ready")
-    # ========== END TWO-PHASE COMMIT ==========
-
-
 def _ensure_ocr_proc() -> bool:
     """
     Lazily start the OCR subprocess on the first frame.
@@ -934,8 +759,6 @@ def _process_ocr_result(ocr_fid: int, ocr_oid: Optional[str]) -> None:
             _ocr_warmed_up = True
             log(f"[OCR-WARMUP] [{ts()}] OCR warmed up after {_ocr_warmup_count} responses — "
                 f"order detection ENABLED (pre-buffer has {len(_pre_buffer)} frames)")
-            # Signal RTSP streamer that OCR is ready - this triggers video restart
-            _signal_ocr_ready()
         else:
             log(f"[OCR-WARMUP] [{ts()}] warmup {_ocr_warmup_count}/{OCR_WARMUP_FRAMES} "
                 f"(buffering frames, order detection DISABLED)")
@@ -1013,23 +836,9 @@ def process_frame(frame: "VideoFrame") -> bool:
     global _frame_counter
     global _ocr_candidate, _ocr_vote_count, _ocr_first_vote_fid, _last_ocr_hit_ts
     global _active_order_id, _active_order_frame_count
-    global _commit_received
 
     _frame_counter += 1
     capture_ts_ms = int(time.time() * 1000)  # capture wall-clock immediately
-
-    # ========== 2PC COMMIT GATE ==========
-    # Don't process frames for OCR until COMMIT is received
-    # This ensures we don't waste OCR cycles on black leader frames
-    # and that we're fully synchronized with RTSP streamer
-    if not _commit_received:
-        # Check if COMMIT has arrived (non-blocking)
-        if _check_commit():
-            log(f"[2PC-GATE] [{ts()}] COMMIT received - beginning frame processing")
-        elif _frame_counter % 30 == 0:
-            # Periodically log that we're waiting
-            log(f"[2PC-GATE] [{ts()}] Waiting for COMMIT signal - frame {_frame_counter} buffered only")
-    # ========== END 2PC COMMIT GATE ==========
 
     # Start OCR subprocess on very first frame
     if _frame_counter == 1:
@@ -1067,13 +876,6 @@ def process_frame(frame: "VideoFrame") -> bool:
     # 5. Always feed the rolling pre-buffer
     _pre_buffer.append(meta)
 
-    # 6. OCR processing — mode-dependent
-    # NOTE: Skip OCR if COMMIT hasn't been received (still in leader/sync phase)
-    # This avoids wasting OCR cycles on black frames during synchronization
-    if not _commit_received:
-        # Still waiting for 2PC COMMIT - skip OCR, just buffer frames
-        return True
-    
     if OCR_SEQUENTIAL_MODE:
         # ═══════════════════════════════════════════════════════════════
         # SEQUENTIAL MODE: Submit EVERY frame and BLOCK until OCR returns

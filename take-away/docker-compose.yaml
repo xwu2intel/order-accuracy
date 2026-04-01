@@ -1,5 +1,5 @@
-version: "3.8"
 
+name: order-accuracy
 services:
   minio:
     image: minio/minio
@@ -10,9 +10,6 @@ services:
       NO_PROXY: "localhost,127.0.0.1,order-accuracy,minio,ovms-vlm,host.docker.internal"
       no_proxy: "localhost,127.0.0.1,order-accuracy,minio,ovms-vlm,host.docker.internal"
     command: server /data --console-address ":9001"
-    ports:
-      - "9000:9000"
-      - "9001:9001"
     volumes:
       - minio_data:/data
     restart: unless-stopped
@@ -29,15 +26,13 @@ services:
   ovms-vlm:
     image: ${OVMS_IMAGE:-openvino/model_server:latest-gpu}
     container_name: oa_ovms_vlm
-    ports:
-      - "8001:8000"
     volumes:
       - ${OVMS_MODELS_DIR:-../ovms-service/models}:/models:ro
       - ${OVMS_CACHE_DIR:-../ovms-service/cache}:/tmp/ov_cache
     environment:
       - OV_CACHE_DIR=/tmp/ov_cache
     command:
-      - --rest_port=8000
+      - --rest_port=8001
       - --config_path=/models/config.json
       - --log_level=INFO
     devices:
@@ -85,15 +80,12 @@ services:
       - ${CONFIG_DIR:-./config}:/config:ro
       - ${DATASETS_DIR:-./datasets}:/datasets:ro
       - ./src:/app:ro  # Mount src for live code changes (read-only)
-      - pipeline_sync:/sync  # Shared sync volume for pipeline readiness signals
     environment:
       # Service mode configuration
       SERVICE_MODE: ${SERVICE_MODE:-single}
       WORKERS: ${WORKERS:-0}
       VLM_WORKERS: ${VLM_WORKERS:-2}
       SCALING_MODE: ${SCALING_MODE:-fixed}
-      # Pipeline synchronization directory
-      PIPELINE_SYNC_DIR: /sync/ready
       # When the external oa_frame_selector service is running it owns frame
       # selection and VLM calls. Station worker skips its own duplicate path.
       EXTERNAL_FRAME_SELECTOR: ${EXTERNAL_FRAME_SELECTOR:-true}
@@ -122,8 +114,6 @@ services:
       RTSP_STREAMER_PORT: ${RTSP_STREAMER_PORT:-8554}
       RTSP_STREAMS: ${RTSP_STREAMS:-}
       RTSP_STREAM_NAME: ${RTSP_STREAM_NAME:-test}
-      
-
       
       # GStreamer capture settings
       CAPTURE_FPS: ${CAPTURE_FPS:-10}  # Frames per second for pipeline (10fps)
@@ -159,8 +149,6 @@ services:
     # ports: Commented out to enable multi-station scaling
     # For single station: use Gradio UI at port 7860
     # For access to specific station: docker port <container_name> 8000
-    ports:
-      - "8000:8000"  # Exposed for monitoring/API access
     depends_on:
       minio:
         condition: service_healthy
@@ -169,6 +157,8 @@ services:
       semantic-service:
         condition: service_healthy
       frame-selector:
+        condition: service_healthy
+      rtsp-streamer:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -259,9 +249,6 @@ services:
   semantic-service:
     image: intel/semantic-search-agent:2026.0.0
     container_name: oa_semantic_service
-    ports:
-      - "8080:8080"
-      - "9090:9090"
     volumes:
       - ${CONFIG_DIR:-./config}:/app/config:ro
       - ${MODELS_DIR:-./models}:/models:ro  # For OpenVINO mode
@@ -325,14 +312,8 @@ services:
     profiles:
       - parallel
       - benchmark
-    depends_on:
-      order-accuracy:
-        condition: service_healthy
-      frame-selector:
-        condition: service_healthy
     volumes:
       - ${VIDEOS_DIR:-./storage/videos}:/media:ro  # Mount videos as read-only
-      - pipeline_sync:/sync  # Shared sync volume for pipeline readiness signals
     environment:
       - MEDIA_DIR=/media
       - RTSP_PORT=8554
@@ -347,13 +328,6 @@ services:
       # Seconds of black frames BEFORE each loop (except first) - gives pipeline reset time
       # Needs to be longer than VLM inference time (~15s) to ensure clean state reset
       - LOOP_WARMUP=${LOOP_WARMUP:-2}
-      # Pipeline synchronization: signal=wait for ready files, delay=legacy timer, none=immediate
-      - SYNC_MODE=${SYNC_MODE:-signal}
-      - SYNC_DIR=/sync/ready
-      - SYNC_TIMEOUT=${SYNC_TIMEOUT:-120}
-      - STARTUP_DELAY=${STARTUP_DELAY:-10}  # Fallback delay if SYNC_MODE=delay
-    ports:
-      - "8554:8554"  # RTSP port
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "nc", "-z", "127.0.0.1", "8554"]
@@ -402,4 +376,3 @@ networks:
 
 volumes:
   minio_data:
-  pipeline_sync:  # Shared volume for RTSP/GStreamer pipeline synchronization

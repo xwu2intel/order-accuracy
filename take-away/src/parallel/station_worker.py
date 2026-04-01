@@ -675,11 +675,6 @@ class StationWorker:
                             })
                             port_ready = True
                             
-                            # Signal ready as soon as RTSP port is open
-                            # This tells the RTSP streamer we're ready to receive frames
-                            # (before waiting for the specific stream path to exist)
-                            self._signal_pipeline_ready()
-                            
                             # SINGLE-PHASE SYNC: When SYNC_MODE=signal, return immediately
                             # after signaling ready. GStreamer will get 404 errors initially
                             # but that's OK - the OCR warmup happens in frame_pipeline.py
@@ -952,74 +947,6 @@ class StationWorker:
         
         return pipeline
     
-    def _signal_pipeline_ready(self):
-        """
-        Signal to RTSP streamer that this station's pipeline is ready.
-        
-        Creates a ready marker file in /sync/ready/{station_id} to indicate
-        this station's GStreamer pipeline has connected and is ready to receive
-        frames. The RTSP streamer waits for all stations to signal ready before
-        starting video playback, ensuring no frames are missed.
-        
-        This solves the race condition where:
-        1. RTSP streamer starts video playback
-        2. GStreamer pipelines take time to connect
-        3. By the time pipelines connect, initial frames (order 384) are missed
-        """
-        sync_dir = os.environ.get('PIPELINE_SYNC_DIR', '/sync/ready')
-        try:
-            os.makedirs(sync_dir, exist_ok=True)
-            ready_file = os.path.join(sync_dir, self.station_id)
-            
-            # Write timestamp to ready file with explicit flush/sync
-            with open(ready_file, 'w') as f:
-                f.write(f"{time.time()}\n{self._pipeline_pid}\n")
-                f.flush()
-                os.fsync(f.fileno())  # Force write to disk
-            
-            # Also sync the directory to ensure file entry is visible
-            dir_fd = os.open(sync_dir, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-            
-            # Verify file was actually created
-            import subprocess
-            file_exists = os.path.exists(ready_file)
-            dir_contents = os.listdir(sync_dir)
-            
-            self._log_structured("info", "pipeline_ready_signaled", {
-                "ready_file": ready_file,
-                "pid": self._pipeline_pid,
-                "file_exists": file_exists,
-                "dir_contents": dir_contents
-            })
-        except Exception as e:
-            # Non-fatal - sync is optional (for cases without shared volume)
-            self._log_structured("warning", "pipeline_ready_signal_failed", {
-                "error": str(e)
-            })
-    
-    def _clear_ready_signal(self):
-        """Clear the ready signal on shutdown (unless preserving for RTSP sync)."""
-        # Skip clearing if we want RTSP streamer to see the signal
-        # This prevents the deadlock where workers and RTSP wait for each other
-        if self._preserve_ready_signal:
-            self._log_structured("debug", "pipeline_ready_signal_preserved", {
-                "reason": "rtsp_unavailable_at_startup"
-            })
-            return
-            
-        sync_dir = os.environ.get('PIPELINE_SYNC_DIR', '/sync/ready')
-        ready_file = os.path.join(sync_dir, self.station_id)
-        try:
-            if os.path.exists(ready_file):
-                os.remove(ready_file)
-                self._log_structured("debug", "pipeline_ready_signal_cleared")
-        except Exception:
-            pass
-
     def _safe_pipeline_restart(self, reason: str):
         """
         Safely restart pipeline with all production safeguards.
@@ -1828,9 +1755,6 @@ class StationWorker:
         Prevents zombie processes and ensures clean exit.
         """
         self._log_structured("info", "cleanup_starting")
-        
-        # Clear ready signal so RTSP streamer knows we're shutting down
-        self._clear_ready_signal()
         
         # Calculate total uptime
         if self._pipeline_metrics.pipeline_start_time > 0:
