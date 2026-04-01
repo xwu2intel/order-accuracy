@@ -297,21 +297,21 @@ create_low_latency_video () {
   video_width=${video_width:-1280}
   video_height=${video_height:-720}
 
-  "$FFMPEG_BIN"
-    -hide_banner
-    -loglevel warning
-    -f lavfi -i "color=c=black:s=${video_width}x${video_height}:r=30:d=30"
-    -re
-    -ss 0
-    -i "$source_file"
-    -filter_complex "[0:v][1:v]concat=n=2:v=1:a=0[outv]"
-    -map "[outv]"
-    -c:v libx264 -preset ultrafast -tune zerolatency
-    -fflags nobuffer
-    -flags low_delay
-    -rtsp_transport tcp
-    -flush_packets 1
-    -f rtsp
+  "$FFMPEG_BIN" \
+    -hide_banner \
+    -loglevel warning \
+    -f lavfi -i "color=c=black:s=${video_width}x${video_height}:r=30:d=30" \
+    -re \
+    -ss 0 \
+    -i "$source_file" \
+    -filter_complex "[0:v][1:v]concat=n=2:v=1:a=0[outv]" \
+    -map "[outv]" \
+    -c:v libx264 -preset ultrafast -tune zerolatency \
+    -fflags nobuffer \
+    -flags low_delay \
+    -rtsp_transport tcp \
+    -flush_packets 1 \
+    -f rtsp \
     "$output_file"
 }
 
