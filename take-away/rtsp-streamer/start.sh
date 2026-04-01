@@ -1,4 +1,4 @@
-#!/bin/sh -x
+#!/bin/sh
 set -eu
 
 MEDIA_DIR=${MEDIA_DIR:-/media}
@@ -192,100 +192,6 @@ create_looped_video() {
   return 0
 }
 
-# Function to stream video with loop warmup support
-stream_video() {
-  stream_name="$1"
-  
-  echo "RTSP stream: $stream_name (LOOP_COUNT=$LOOP_COUNT, LOOP_WARMUP=${LOOP_WARMUP}s)" 1>&2
-  
-  cmds=()
-  if [ "$LOOP_COUNT" = "-1" ]; then
-    # Infinite loop mode - use simple -stream_loop
-    # Note: No warmup in infinite mode (would require complex filter)
-    # LOW-LATENCY FLAGS for faster client connection
-    echo "Using infinite loop mode (no warmup, low-latency)" 1>&2
-    cmds=(
-      "$FFMPEG_BIN"
-      -hide_banner 
-      -loglevel warning 
-      -fflags nobuffer 
-      -flags low_delay 
-      -re 
-      -ss 0 
-      -stream_loop -1 
-      -i "$source_file" 
-      -c copy
-      -rtsp_transport tcp
-      -flush_packets 1
-      -f rtsp
-      "rtsp://127.0.0.1:${RTSP_PORT}/${stream_name}"
-    )
-  elif [ "$LOOP_COUNT" = "1" ]; then
-    # Single play - force seek to beginning with -ss 0
-    # LOW-LATENCY FLAGS + VIDEO LEADER:
-    # - Add 30 seconds of black frames at start to give GStreamer time to connect
-    # - This accounts for: initial connection (~2s) + potential restart (~2s) + OCR warmup (~10s) + buffer
-    # - This ensures order 384 (at second 2) is captured even with pipeline restart
-    # - fflags nobuffer: No output buffering
-    # - flags low_delay: Enable low-delay mode
-    # - flush_packets 1: Flush packets immediately
-    low_latency_file="/tmp/low_latency_video_${stream_name}.mp4"
-    if create_low_latency_video "$source_file" "$low_latency_file" 1>&2 && [ -f "$low_latency_file" ]; then
-      echo "Using single play mode with 30s leader (low-latency)" 1>&2
-      cmds=(
-        "$FFMPEG_BIN"
-        -hide_banner
-        -loglevel warning
-        -re
-        -ss 0
-        -i "$low_latency_file"
-        -c copy
-        -rtsp_transport tcp
-        -flush_packets 1
-        -f rtsp
-        "rtsp://127.0.0.1:${RTSP_PORT}/${stream_name}"
-      )
-    fi
-  else
-    # Finite loop with warmup - try to create pre-concatenated video
-    looped_file="/tmp/looped_video_${stream_name}.mp4"
-    
-    if create_looped_video "$source_file" "$LOOP_COUNT" "$LOOP_WARMUP" "$looped_file" 1>&2 && [ -f "$looped_file" ]; then
-      echo "Streaming pre-looped video with warmup" 1>&2
-      cmds=(
-        "$FFMPEG_BIN"
-        -hide_banner
-        -loglevel warning
-        -re
-        -ss 0 
-        -i "$looped_file"
-        -c copy
-        -rtsp_transport tcp
-        -f rtsp
-        "rtsp://127.0.0.1:${RTSP_PORT}/${stream_name}"
-      )
-    else
-      # Fallback to simple -stream_loop without warmup
-      echo "Falling back to simple loop mode (no warmup)" 1>&2
-      stream_loop_val=$((LOOP_COUNT - 1))
-      cmds=(
-        "$FFMPEG_BIN"
-        -hide_banner
-        -loglevel warning
-        -re
-        -ss 0 
-        -stream_loop $stream_loop_val
-        -i "$source_file"
-        -c copy
-        -rtsp_transport tcp
-        -f rtsp
-        "rtsp://127.0.0.1:${RTSP_PORT}/${stream_name}"
-      )
-    fi
-  fi
-  echo "${cmds[@]}"
-}
-
 create_low_latency_video () {
   source_file="$1"
   output_file="$2"
@@ -309,10 +215,91 @@ create_low_latency_video () {
     -c:v libx264 -preset ultrafast -tune zerolatency \
     -fflags nobuffer \
     -flags low_delay \
-    -rtsp_transport tcp \
-    -flush_packets 1 \
-    -f rtsp \
     "$output_file"
+}
+
+# Function to stream video with loop warmup support
+stream_video() {
+  stream_name="$1"
+  
+  echo "RTSP stream: $stream_name (LOOP_COUNT=$LOOP_COUNT, LOOP_WARMUP=${LOOP_WARMUP}s)" 1>&2
+  
+  if [ "$LOOP_COUNT" = "-1" ]; then
+    # Infinite loop mode - use simple -stream_loop
+    # Note: No warmup in infinite mode (would require complex filter)
+    # LOW-LATENCY FLAGS for faster client connection
+    echo "Using infinite loop mode (no warmup, low-latency)" 1>&2
+    echo "$FFMPEG_BIN" \
+      -hide_banner \
+      -loglevel warning \
+      -fflags nobuffer \
+      -flags low_delay \
+      -re \
+      -ss 0 \
+      -stream_loop -1 \
+      -i "$source_file" \
+      -c copy \
+      -rtsp_transport tcp \
+      -flush_packets 1 \
+      -f rtsp \
+      "rtsp://127.0.0.1:${RTSP_PORT}/${stream_name}"
+  elif [ "$LOOP_COUNT" = "1" ]; then
+    # Single play - force seek to beginning with -ss 0
+    # LOW-LATENCY FLAGS + VIDEO LEADER:
+    # - Add 30 seconds of black frames at start to give GStreamer time to connect
+    # - This accounts for: initial connection (~2s) + potential restart (~2s) + OCR warmup (~10s) + buffer
+    # - This ensures order 384 (at second 2) is captured even with pipeline restart
+    # - fflags nobuffer: No output buffering
+    # - flags low_delay: Enable low-delay mode
+    # - flush_packets 1: Flush packets immediately
+    low_latency_file="/tmp/low_latency_video_${stream_name}.mp4"
+    if create_low_latency_video "$source_file" "$low_latency_file" 1>&2 && [ -f "$low_latency_file" ]; then
+      echo "Using single play mode with 30s leader (low-latency)" 1>&2
+      echo "$FFMPEG_BIN" \
+        -hide_banner \
+        -loglevel warning \
+        -re \
+        -ss 0 \
+        -i "$low_latency_file" \
+        -c copy \
+        -rtsp_transport tcp \
+        -flush_packets 1 \
+        -f rtsp \
+        "rtsp://127.0.0.1:${RTSP_PORT}/${stream_name}"
+    fi
+  else
+    # Finite loop with warmup - try to create pre-concatenated video
+    looped_file="/tmp/looped_video_${stream_name}.mp4"
+    
+    if create_looped_video "$source_file" "$LOOP_COUNT" "$LOOP_WARMUP" "$looped_file" 1>&2 && [ -f "$looped_file" ]; then
+      echo "Streaming pre-looped video with warmup" 1>&2
+      echo "$FFMPEG_BIN" \
+        -hide_banner \
+        -loglevel warning \
+        -re \
+        -ss 0 \ 
+        -i "$looped_file" \
+        -c copy \
+        -rtsp_transport tcp \
+        -f rtsp \
+        "rtsp://127.0.0.1:${RTSP_PORT}/${stream_name}"
+    else
+      # Fallback to simple -stream_loop without warmup
+      echo "Falling back to simple loop mode (no warmup)" 1>&2
+      stream_loop_val=$((LOOP_COUNT - 1))
+      echo "$FFMPEG_BIN" \
+        -hide_banner \
+        -loglevel warning \
+        -re \
+        -ss 0 \ 
+        -stream_loop $stream_loop_val \
+        -i "$source_file" \
+        -c copy \
+        -rtsp_transport tcp \
+        -f rtsp \
+        "rtsp://127.0.0.1:${RTSP_PORT}/${stream_name}"
+    fi
+  fi
 }
 
 # Function to start all video streams
