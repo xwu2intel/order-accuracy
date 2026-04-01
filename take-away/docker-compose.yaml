@@ -32,7 +32,7 @@ services:
     environment:
       - OV_CACHE_DIR=/tmp/ov_cache
     command:
-      - --rest_port=8001
+      - --rest_port=8000
       - --config_path=/models/config.json
       - --log_level=INFO
     devices:
@@ -309,9 +309,6 @@ services:
         - https_proxy=${HTTPS_PROXY}
         - no_proxy=${NO_PROXY}
     container_name: oa_rtsp_streamer
-    profiles:
-      - parallel
-      - benchmark
     volumes:
       - ${VIDEOS_DIR:-./storage/videos}:/media:ro  # Mount videos as read-only
     environment:

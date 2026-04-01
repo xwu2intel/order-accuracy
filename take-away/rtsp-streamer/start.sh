@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/sh -x
 set -eu
 
 MEDIA_DIR=${MEDIA_DIR:-/media}
@@ -257,6 +257,7 @@ stream_video() {
         -hide_banner
         -loglevel warning
         -re
+        -ss 0 
         -i "$looped_file"
         -c copy
         -rtsp_transport tcp
@@ -272,6 +273,7 @@ stream_video() {
         -hide_banner
         -loglevel warning
         -re
+        -ss 0 
         -stream_loop $stream_loop_val
         -i "$source_file"
         -c copy
