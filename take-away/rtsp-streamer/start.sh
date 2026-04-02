@@ -211,6 +211,8 @@ create_low_latency_video () {
     -filter_complex "[0:v][1:v]concat=n=2:v=1:a=0[outv]" \
     -map "[outv]" \
     -c:v libx264 -preset ultrafast -tune zerolatency \
+    -g 1 -keyint_min 1 -sc_threshold 0 \
+    -profile:v baseline -level 4.0 \
     -fflags nobuffer \
     -flags low_delay \
     "$output_file"
