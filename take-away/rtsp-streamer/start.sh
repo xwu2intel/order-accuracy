@@ -207,8 +207,6 @@ create_low_latency_video () {
     -hide_banner \
     -loglevel warning \
     -f lavfi -i "color=c=black:s=${video_width}x${video_height}:r=30:d=30" \
-    -re \
-    -ss 0 \
     -i "$source_file" \
     -filter_complex "[0:v][1:v]concat=n=2:v=1:a=0[outv]" \
     -map "[outv]" \
